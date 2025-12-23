@@ -66,6 +66,7 @@ class TransformerBlock(nn.Module):
         # 我们的模型只需要 [q=1024, k=512, v=512] = 2048
         # 所以 split 为 [2048, 1024, 1024]，然后都砍掉一半
         q, k, v = qkv.split([2048, 1024, 1024], dim=-1)  # q:[B,L,2048], k:[B,L,1024], v:[B,L,1024]
+        # TODO add assert for debug
         q = q[:, :, :self.num_heads * self.head_dim]  # 保留前 1024 维
         k = k[:, :, :self.num_kv_heads * self.head_dim]  # 保留前 512 维
         v = v[:, :, :self.num_kv_heads * self.head_dim]  # 保留前 512 维
