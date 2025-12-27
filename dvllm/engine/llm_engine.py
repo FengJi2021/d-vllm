@@ -12,11 +12,10 @@ from dvllm.engine.scheduler import Scheduler
 from dvllm.engine.seq import Sequence
 
 
-
-
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 class LLMEngine:
     def __init__(self, model, **kwargs):
@@ -28,7 +27,9 @@ class LLMEngine:
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         device_type = kwargs.get("device_type", "auto")
         config_kwargs["device_type"] = device_type
-        logger.debug(f"fields={config_fields}, kwargs={config_kwargs},devices={device_type}")
+        logger.debug(
+            f"fields={config_fields}, kwargs={config_kwargs},devices={device_type}"
+        )
         config = Config(model, **config_kwargs)
         logger.debug(f"config={config}")
         self.ps = []
@@ -69,13 +70,14 @@ class LLMEngine:
         seqs, is_prefill = self.scheduler.schedule()
         token_ids = self.model_runner.call("run", seqs, is_prefill, self.dump_path)
         self.scheduler.postprocess(seqs, token_ids)
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        outputs = [
+            (seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished
+        ]
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
         return outputs, num_tokens
 
     def is_finished(self):
-        return self.scheduler.is_finished()   
-    
+        return self.scheduler.is_finished()
 
     def generate(
         self,
@@ -107,10 +109,12 @@ class LLMEngine:
                     prefill_throughput = num_tokens / (perf_counter() - t)
                 else:
                     decode_throughput = -num_tokens / (perf_counter() - t)
-                pbar.set_postfix({
-                    "Prefill": f"{int(prefill_throughput)}tok/s",
-                    "Decode": f"{int(decode_throughput)}tok/s",
-                })
+                pbar.set_postfix(
+                    {
+                        "Prefill": f"{int(prefill_throughput)}tok/s",
+                        "Decode": f"{int(decode_throughput)}tok/s",
+                    }
+                )
 
             # 循环里保持原来的赋值
             for seq_id, token_ids in output:
@@ -122,13 +126,12 @@ class LLMEngine:
         outputs_list = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
 
         # 解码成文本 + 保留 token_ids
-        outputs_list = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} 
-                        for token_ids in outputs_list]
+        outputs_list = [
+            {"text": self.tokenizer.decode(token_ids), "token_ids": token_ids}
+            for token_ids in outputs_list
+        ]
 
         if use_tqdm:
             pbar.close()
 
         return outputs_list
-
-
-

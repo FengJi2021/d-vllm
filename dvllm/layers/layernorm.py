@@ -15,7 +15,9 @@ class RMSNorm(nn.Module):
         x = x * torch.rsqrt(var + self.eps)
         return x.to(orig_dtype) * self.weight
 
-    def add_rms_forward(self, x: torch.Tensor, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def add_rms_forward(
+        self, x: torch.Tensor, residual: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # 调整 residual 形状
         if residual.shape != x.shape:
             if residual.dim() == 2 and x.dim() == 3:
@@ -24,7 +26,7 @@ class RMSNorm(nn.Module):
             else:
                 # 其他情况尝试 reshape
                 residual = residual.view(x.shape)
-    
+
         orig_dtype = x.dtype
         x = x.float() + residual.float()
         residual_out = x.to(orig_dtype)
@@ -33,7 +35,9 @@ class RMSNorm(nn.Module):
         return x.to(orig_dtype) * self.weight, residual_out
 
     @torch.compile
-    def forward(self, x: torch.Tensor, residual: torch.Tensor | None = None) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             return self.rms_forward(x)
         else:

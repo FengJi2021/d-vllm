@@ -4,7 +4,10 @@ from glob import glob
 import torch
 from safetensors.torch import safe_open
 
-def default_weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor, shard_id=None):
+
+def default_weight_loader(
+    param: torch.nn.Parameter, loaded_weight: torch.Tensor, shard_id=None
+):
     """
     默认权重加载函数
     """
@@ -13,10 +16,11 @@ def default_weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor
         loaded_weight = loaded_weight[shard_id]
     param.data.copy_(loaded_weight)
 
+
 def load_model(model: torch.nn.Module, path: str, device: torch.device | None = None):
     """
     加载模型权重，兼容官方 HF Qwen3 权重
-    
+
     处理权重名称的不匹配：
     - HF 权重中 q_proj, k_proj, v_proj 分开 -> 合并成 qkv_proj [q;k;v]
     - HF 权重中 gate_proj, up_proj 分开 -> 保持分开
@@ -50,21 +54,23 @@ def load_model(model: torch.nn.Module, path: str, device: torch.device | None = 
             base_name = weight_name.replace(".q_proj.weight", "")
             k_name = weight_name.replace(".q_proj.weight", ".k_proj.weight")
             v_name = weight_name.replace(".q_proj.weight", ".v_proj.weight")
-            
+
             if k_name in all_weights and v_name in all_weights:
                 q = all_weights[weight_name]  # [2048, 1024]
-                k = all_weights[k_name]        # [1024, 1024]
-                v = all_weights[v_name]        # [1024, 1024]
-                
+                k = all_weights[k_name]  # [1024, 1024]
+                v = all_weights[v_name]  # [1024, 1024]
+
                 # 合并完整的权重，不砍
                 qkv = torch.cat([q, k, v], dim=0)  # [4096, 1024]
-                
+
                 # 替换为 qkv_proj
                 qkv_name = weight_name.replace(".q_proj.weight", ".qkv_proj.weight")
                 weight_cache[qkv_name] = qkv
-                print(f"[OK] Merged {weight_name.replace('model.', '')} + k + v -> qkv_proj shape={qkv.shape}")
+                print(
+                    f"[OK] Merged {weight_name.replace('model.', '')} + k + v -> qkv_proj shape={qkv.shape}"
+                )
                 qkv_merged_count += 1
-                
+
                 # 标记已处理
                 all_weights.pop(k_name, None)
                 all_weights.pop(v_name, None)
@@ -77,25 +83,25 @@ def load_model(model: torch.nn.Module, path: str, device: torch.device | None = 
     # 第二步：加载权重到模型
     loaded_count = 0
     skipped_count = 0
-    
+
     for weight_name, weight_tensor in all_weights.items():
         # 去掉 HF 前缀
         if weight_name.startswith(prefix):
-            short_name = weight_name[len(prefix):]
+            short_name = weight_name[len(prefix) :]
         else:
             short_name = weight_name
 
         # 处理命名映射：HF 权重文件结构 -> 模型架构结构
         mapped_name = short_name
-        
+
         # 处理 LayerNorm 命名
         mapped_name = mapped_name.replace("input_layernorm", "attn_norm")
         mapped_name = mapped_name.replace("post_attention_layernorm", "ffn_norm")
-        
+
         # 处理 self_attn -> 直接到层（但保留其他），例如 self_attn.q_proj -> q_proj
         if ".self_attn." in mapped_name:
             mapped_name = mapped_name.replace(".self_attn.", ".")
-        
+
         # 处理 mlp -> 直接到层
         if ".mlp." in mapped_name:
             mapped_name = mapped_name.replace(".mlp.", ".")
@@ -112,15 +118,27 @@ def load_model(model: torch.nn.Module, path: str, device: torch.device | None = 
         if param.shape != weight_tensor_device.shape:
             # 尝试处理某些权重被扩大的情况
             # o_proj: 权重 [out, 2*in] 但模型期望 [out, in]，只取前半部分
-            if "o_proj" in mapped_name and weight_tensor_device.shape[1] == 2 * param.shape[1]:
-                weight_tensor_device = weight_tensor_device[:, :param.shape[1]]
-                print(f"[OK] o_proj halved: {weight_tensor.shape} -> {weight_tensor_device.shape}")
-            # down_proj: 权重 [out, 2*in] 但模型期望 [out, in]，只取前半部分  
-            elif "down_proj" in mapped_name and weight_tensor_device.shape[1] == 2 * param.shape[1]:
-                weight_tensor_device = weight_tensor_device[:, :param.shape[1]]
-                print(f"[OK] down_proj halved: {weight_tensor.shape} -> {weight_tensor_device.shape}")
+            if (
+                "o_proj" in mapped_name
+                and weight_tensor_device.shape[1] == 2 * param.shape[1]
+            ):
+                weight_tensor_device = weight_tensor_device[:, : param.shape[1]]
+                print(
+                    f"[OK] o_proj halved: {weight_tensor.shape} -> {weight_tensor_device.shape}"
+                )
+            # down_proj: 权重 [out, 2*in] 但模型期望 [out, in]，只取前半部分
+            elif (
+                "down_proj" in mapped_name
+                and weight_tensor_device.shape[1] == 2 * param.shape[1]
+            ):
+                weight_tensor_device = weight_tensor_device[:, : param.shape[1]]
+                print(
+                    f"[OK] down_proj halved: {weight_tensor.shape} -> {weight_tensor_device.shape}"
+                )
             else:
-                print(f"[WARN] shape mismatch for {mapped_name}, model: {param.shape}, weight: {weight_tensor_device.shape}, skip.")
+                print(
+                    f"[WARN] shape mismatch for {mapped_name}, model: {param.shape}, weight: {weight_tensor_device.shape}, skip."
+                )
                 skipped_count += 1
                 continue
 

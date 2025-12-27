@@ -6,6 +6,7 @@ import torch.nn.functional as F
 try:
     import triton
     import triton.language as tl
+
     HAS_TRITON = True
 except Exception:
     triton = None
@@ -14,6 +15,7 @@ except Exception:
 
 try:
     from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+
     HAS_FLASH_ATTN = True
 except Exception:
     flash_attn_varlen_func = None
@@ -24,6 +26,7 @@ from dvllm.utils.context import get_context
 
 # Only define Triton kernel if triton is present
 if HAS_TRITON:
+
     @triton.jit
     def store_kvcache_kernel(
         key_ptr,
@@ -51,9 +54,18 @@ if HAS_TRITON:
         N, num_heads, head_dim = key.shape
         D = num_heads * head_dim
         store_kvcache_kernel[(N,)](
-            key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D
+            key,
+            key.stride(0),
+            value,
+            value.stride(0),
+            k_cache,
+            v_cache,
+            slot_mapping,
+            D,
         )
+
 else:
+
     def store_kvcache_triton(*args, **kwargs):
         raise RuntimeError("triton not available")
 
@@ -70,15 +82,19 @@ class Attention(nn.Module):
     def _fallback_prefill_attention(self, q, k, v, context):
         if q.dim() == 4:
             try:
-                return F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
+                return F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=None, is_causal=True
+                )
             except Exception:
                 B, Lq, H, D = q.shape
                 _, Lk, _, _ = k.shape
                 q2 = q.reshape(B * H, Lq, D)
                 k2 = k.reshape(B * H, Lk, D)
                 v2 = v.reshape(B * H, Lk, D)
-                scores = torch.bmm(q2, k2.transpose(1, 2)) * (1.0 / (D ** 0.5))
-                mask = torch.tril(torch.ones(Lq, Lk, device=scores.device, dtype=torch.bool))
+                scores = torch.bmm(q2, k2.transpose(1, 2)) * (1.0 / (D**0.5))
+                mask = torch.tril(
+                    torch.ones(Lq, Lk, device=scores.device, dtype=torch.bool)
+                )
                 scores = scores.masked_fill(~mask.unsqueeze(0), float("-inf"))
                 probs = F.softmax(scores, dim=-1)
                 out = torch.bmm(probs, v2)
@@ -88,7 +104,7 @@ class Attention(nn.Module):
             q2 = q.reshape(N * H, 1, D)
             k2 = k.reshape(N * H, -1, D)
             v2 = v.reshape(N * H, -1, D)
-            scores = torch.bmm(q2, k2.transpose(1, 2)) * (1.0 / (D ** 0.5))
+            scores = torch.bmm(q2, k2.transpose(1, 2)) * (1.0 / (D**0.5))
             probs = F.softmax(scores, dim=-1)
             out = torch.bmm(probs, v2)
             return out.reshape(N, H, D)
@@ -98,7 +114,7 @@ class Attention(nn.Module):
         q2 = q.reshape(H * N, 1, D)
         k2 = k_cache.permute(1, 0, 2).reshape(H * N, k_cache.size(0), D)
         v2 = v_cache.permute(1, 0, 2).reshape(H * N, v_cache.size(0), D)
-        scores = torch.bmm(q2, k2.transpose(1, 2)) * (1.0 / (D ** 0.5))
+        scores = torch.bmm(q2, k2.transpose(1, 2)) * (1.0 / (D**0.5))
         probs = F.softmax(scores, dim=-1)
         out = torch.bmm(probs, v2)
         return out.reshape(N, H, D)
@@ -126,19 +142,29 @@ class Attention(nn.Module):
         if context.is_prefill:
             if use_flash:
                 return flash_attn_varlen_func(
-                    q, k, v,
-                    max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
-                    max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                    softmax_scale=self.scale, causal=True, block_table=context.block_tables
+                    q,
+                    k,
+                    v,
+                    max_seqlen_q=context.max_seqlen_q,
+                    cu_seqlens_q=context.cu_seqlens_q,
+                    max_seqlen_k=context.max_seqlen_k,
+                    cu_seqlens_k=context.cu_seqlens_k,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    block_table=context.block_tables,
                 )
             else:
                 return self._fallback_prefill_attention(q, k, v, context)
         else:
             if use_flash:
                 return flash_attn_with_kvcache(
-                    q.unsqueeze(1), k_cache, v_cache,
-                    cache_seqlens=context.context_lens, block_table=context.block_tables,
-                    softmax_scale=self.scale, causal=True
+                    q.unsqueeze(1),
+                    k_cache,
+                    v_cache,
+                    cache_seqlens=context.context_lens,
+                    block_table=context.block_tables,
+                    softmax_scale=self.scale,
+                    causal=True,
                 )
             else:
                 return self._fallback_decode_attention(q, k_cache, v_cache, context)

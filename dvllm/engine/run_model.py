@@ -42,7 +42,9 @@ class RunModel:
         # 2. NCCL 多卡，仅在 CUDA 下启用
         # ------------------------
         if self.device.type == "cuda" and self.world_size > 1:
-            dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+            dist.init_process_group(
+                "nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank
+            )
             torch.cuda.set_device(rank)
 
         # ------------------------
@@ -67,13 +69,14 @@ class RunModel:
         # 格式: DV_DEBUG_LAYERS="25,26,27" 或者 "25-27"
         try:
             import os
+
             dbg = os.environ.get("DV_DEBUG_LAYERS", None)
             if dbg:
                 ids = []
-                for part in dbg.split(','):
+                for part in dbg.split(","):
                     part = part.strip()
-                    if '-' in part:
-                        a, b = part.split('-', 1)
+                    if "-" in part:
+                        a, b = part.split("-", 1)
                         ids.extend(list(range(int(a), int(b) + 1)))
                     else:
                         ids.append(int(part))
@@ -93,9 +96,9 @@ class RunModel:
         # ------------------------
         self.sampler = Sampler()
         self.warmup_model()
-        
+
         self.allocate_kv_cache()
-        
+
         if not self.enforce_eager and self.device.type == "cuda":
             self.capture_cudagraph()
 
@@ -114,12 +117,11 @@ class RunModel:
                 dist.barrier()
                 self.shm = SharedMemory(name="nanovllm")
                 self.loop()
-        
 
     def exit(self):
         if self.world_size > 1:
-            if hasattr(self,"shm"):
-                try: 
+            if hasattr(self, "shm"):
+                try:
                     self.shm.close()
                 except Exception:
                     pass
@@ -132,30 +134,30 @@ class RunModel:
                     self.shm.unlink()
                 except Exception:
                     pass
-        if not self.enforce_eager :
+        if not self.enforce_eager:
             del self.graphs
             del self.graph_pool
-        
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
         try:
             dist.destroy_process_group()
-        except Exception:  
-            pass    
+        except Exception:
+            pass
 
     def loop(self):
         while True:
-           method_name, args = self.read_shm()
-           self.call(method_name, *args)
-           if method_name == "exit":    
-               break   
+            method_name, args = self.read_shm()
+            self.call(method_name, *args)
+            if method_name == "exit":
+                break
 
     def read_shm(self):
         assert self.world_size > 1 and self.rank > 0
         self.event.wait()
         n = int.from_bytes(self.shm.buf[0:4], "little")
-        method_name, *args = pickle.loads(self.shm.buf[4:n+4])
+        method_name, *args = pickle.loads(self.shm.buf[4 : n + 4])
         self.event.clear()
         return method_name, args
 
@@ -164,7 +166,7 @@ class RunModel:
         data = pickle.dumps([method_name, *args])
         n = len(data)
         self.shm.buf[0:4] = n.to_bytes(4, "little")
-        self.shm.buf[4:n+4] = data
+        self.shm.buf[4 : n + 4] = data
         for event in self.event:
             event.set()
 
@@ -173,7 +175,6 @@ class RunModel:
             self.write_shm(method_name, *args)
         method = getattr(self, method_name, None)
         return method(*args)
-
 
     def warmup_model(self):
         # 1. 自动选择设备
@@ -192,18 +193,22 @@ class RunModel:
         # 3. 准备 warmup 序列
         max_num_batched_tokens = self.config.max_num_batched_tokens
         max_model_len = self.config.max_model_len
-        
+
         # 对于 MPS，使用较小的 warmup batch 以避免内存溢出
         if device == "mps":
             num_seqs = min(1, self.config.max_num_seqs)  # 只用 1 个序列做 warmup
             warmup_seq_len = min(256, max_model_len)  # 限制序列长度
         else:
-            num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
+            num_seqs = min(
+                max_num_batched_tokens // max_model_len, self.config.max_num_seqs
+            )
             warmup_seq_len = max_model_len
-        
+
         seqs = [Sequence(token_ids=[0] * warmup_seq_len) for _ in range(num_seqs)]
-        
-        logging.info(f"Warmup model with {num_seqs} sequences of length {warmup_seq_len} on {device}")
+
+        logging.info(
+            f"Warmup model with {num_seqs} sequences of length {warmup_seq_len} on {device}"
+        )
 
         # 4. 执行 warmup
         self.run(seqs, is_prefill=True)
@@ -217,20 +222,36 @@ class RunModel:
         device = self.device
 
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
+        head_dim = getattr(
+            hf_config,
+            "head_dim",
+            hf_config.hidden_size // hf_config.num_attention_heads,
+        )
 
         if device.type == "cuda":
             free, total = torch.cuda.mem_get_info()
             used = total - free
             peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
             current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-            block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
-            config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
+            block_bytes = (
+                2
+                * hf_config.num_hidden_layers
+                * self.block_size
+                * num_kv_heads
+                * head_dim
+                * hf_config.torch_dtype.itemsize
+            )
+            config.num_kvcache_blocks = (
+                int(total * config.gpu_memory_utilization - used - peak + current)
+                // block_bytes
+            )
         elif device.type == "mps":
             # MPS (Apple Metal) 内存受限，使用较小的 KV cache
             # Qwen3-0.6B 模型，block_size=256，约 2 个块就够了
             config.num_kvcache_blocks = min(4, config.max_model_len // self.block_size)
-            logging.info(f"MPS device: limiting KV cache blocks to {config.num_kvcache_blocks}")
+            logging.info(
+                f"MPS device: limiting KV cache blocks to {config.num_kvcache_blocks}"
+            )
         else:
             # CPU 直接固定大小
             config.num_kvcache_blocks = min(64, config.max_model_len // self.block_size)
@@ -245,7 +266,7 @@ class RunModel:
             num_kv_heads,
             head_dim,
             device=device,
-            dtype=hf_config.torch_dtype
+            dtype=hf_config.torch_dtype,
         )
 
         layer_id = 0
@@ -257,15 +278,17 @@ class RunModel:
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
-        block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
+        block_tables = [
+            seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs
+        ]
 
         # 根据 device 决定 pin_memory 和 non_blocking
         pin_memory = self.device.type == "cuda"
         non_blocking = self.device.type == "cuda"
 
-        block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=pin_memory).to(
-            self.device, non_blocking=non_blocking
-        )
+        block_tables = torch.tensor(
+            block_tables, dtype=torch.int32, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
         return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence]):
@@ -283,7 +306,7 @@ class RunModel:
 
         for seq in seqs:
             seqlen = len(seq)
-            input_ids.extend(seq[seq.num_cached_tokens:])
+            input_ids.extend(seq[seq.num_cached_tokens :])
             positions.extend(list(range(seq.num_cached_tokens, seqlen)))
             seqlen_q = seqlen - seq.num_cached_tokens
             seqlen_k = seqlen
@@ -304,14 +327,32 @@ class RunModel:
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:  # prefix cache
             block_tables = self.prepare_block_tables(seqs)
 
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=pin_memory).to(self.device, non_blocking=non_blocking)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=pin_memory).to(self.device, non_blocking=non_blocking)
-        cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=pin_memory).to(self.device, non_blocking=non_blocking)
-        cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=pin_memory).to(self.device, non_blocking=non_blocking)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=pin_memory).to(self.device, non_blocking=non_blocking)
-        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
+        input_ids = torch.tensor(
+            input_ids, dtype=torch.int64, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
+        positions = torch.tensor(
+            positions, dtype=torch.int64, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
+        cu_seqlens_q = torch.tensor(
+            cu_seqlens_q, dtype=torch.int32, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
+        cu_seqlens_k = torch.tensor(
+            cu_seqlens_k, dtype=torch.int32, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
+        slot_mapping = torch.tensor(
+            slot_mapping, dtype=torch.int32, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
+        set_context(
+            True,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            slot_mapping,
+            None,
+            block_tables,
+        )
         return input_ids, positions
-
 
     def prepare_decode(self, seqs: list[Sequence]):
         pin_memory = self.device.type == "cuda"
@@ -326,16 +367,31 @@ class RunModel:
             input_ids.append(seq.last_token)
             positions.append(len(seq) - 1)
             context_lens.append(len(seq))
-            slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1)
+            slot_mapping.append(
+                seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
+            )
 
         block_tables = self.prepare_block_tables(seqs)
 
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=pin_memory).to(self.device, non_blocking=non_blocking)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=pin_memory).to(self.device, non_blocking=non_blocking)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=pin_memory).to(self.device, non_blocking=non_blocking)
-        context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=pin_memory).to(self.device, non_blocking=non_blocking)
+        input_ids = torch.tensor(
+            input_ids, dtype=torch.int64, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
+        positions = torch.tensor(
+            positions, dtype=torch.int64, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
+        slot_mapping = torch.tensor(
+            slot_mapping, dtype=torch.int32, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
+        context_lens = torch.tensor(
+            context_lens, dtype=torch.int32, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
 
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        set_context(
+            False,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_tables=block_tables,
+        )
         return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]):
@@ -345,25 +401,38 @@ class RunModel:
         pin_memory = self.device.type == "cuda"
         non_blocking = self.device.type == "cuda"
 
-        temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=pin_memory).to(
-            self.device, non_blocking=non_blocking
-        )
+        temperatures = torch.tensor(
+            temperatures, dtype=torch.float32, pin_memory=pin_memory
+        ).to(self.device, non_blocking=non_blocking)
         return temperatures
 
     @torch.inference_mode()
-    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool, dump_path: str = None):
+    def run_model(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        is_prefill: bool,
+        dump_path: str = None,
+    ):
         device_type = self.device.type  # 根据初始化的 device 判断
 
         # 如果是 prefill、强制 eager、batch 太大，或者不是 CUDA，则直接推理
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512 or device_type != "cuda":
-            return self.model.compute_logits(self.model(input_ids, positions, dump_path=dump_path))
+        if (
+            is_prefill
+            or self.enforce_eager
+            or input_ids.size(0) > 512
+            or device_type != "cuda"
+        ):
+            return self.model.compute_logits(
+                self.model(input_ids, positions, dump_path=dump_path)
+            )
 
         # 只有 CUDA 才走 cudagraph
         bs = input_ids.size(0)
         context = get_context()
         graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
         graph_vars = self.graph_vars
-    
+
         # 将输入复制到 graph 变量
         graph_vars["input_ids"][:bs] = input_ids
         graph_vars["positions"][:bs] = positions
@@ -371,17 +440,20 @@ class RunModel:
         graph_vars["slot_mapping"][:bs] = context.slot_mapping
         graph_vars["context_lens"].zero_()
         graph_vars["context_lens"][:bs] = context.context_lens
-        graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-    
+        graph_vars["block_tables"][
+            :bs, : context.block_tables.size(1)
+        ] = context.block_tables
+
         # replay cudagraph
         graph.replay()
 
         # 返回 logits
         return self.model.compute_logits(graph_vars["outputs"][:bs])
 
+    def run(
+        self, seqs: list[Sequence], is_prefill: bool, dump_path: str = None
+    ) -> list[int]:
 
-    def run(self, seqs: list[Sequence], is_prefill: bool, dump_path: str = None) -> list[int]:
-        
         if not hasattr(self, "device"):
             if torch.backends.mps.is_available():
                 logging.info("Using MPS device")
@@ -391,43 +463,48 @@ class RunModel:
                 self.device = torch.device("cuda")
             else:
                 logging.info("Using CPU device")
-                self.device = torch.device("cpu")   
-        
+                self.device = torch.device("cpu")
+
         # 2. 批量生成 input_ids / positions
         # 注意：prepare_prefill / prepare_decode 可能期望 token_ids
         result = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         if result is None:
-            raise RuntimeError("prepare_prefill / prepare_decode returned None, check input seqs")
-    
+            raise RuntimeError(
+                "prepare_prefill / prepare_decode returned None, check input seqs"
+            )
+
         input_ids, positions = result
 
         # 3. 放到目标 device
         input_ids = input_ids.to(self.device)
         positions = positions.to(self.device)
 
-    
         # 3. 生成采样用的 temperatures
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
 
         # 4. 运行模型
         logits = self.run_model(input_ids, positions, is_prefill, dump_path=dump_path)
-        
+
         # DEBUG: 检查 logits 是否为 None 或包含 NaN
         if logits is None:
             logging.error("ERROR: logits is None! Model inference failed.")
             token_ids = [0] * len(seqs)  # fallback
             reset_context()
             return token_ids
-        
-        logging.debug(f"logits shape: {logits.shape}, dtype: {logits.dtype}, device: {logits.device}")
-        logging.debug(f"logits stats: min={logits.min()}, max={logits.max()}, mean={logits.mean()}")
-        
+
+        logging.debug(
+            f"logits shape: {logits.shape}, dtype: {logits.dtype}, device: {logits.device}"
+        )
+        logging.debug(
+            f"logits stats: min={logits.min()}, max={logits.max()}, mean={logits.mean()}"
+        )
+
         if torch.isnan(logits).any():
             logging.error("ERROR: logits contain NaN! Model computation failed.")
             token_ids = [0] * len(seqs)  # fallback
             reset_context()
             return token_ids
-        
+
         if torch.isinf(logits).any():
             logging.error("ERROR: logits contain Inf! Model computation failed.")
             token_ids = [0] * len(seqs)  # fallback
@@ -442,34 +519,42 @@ class RunModel:
             # 如果用户请求了详细 debug（通过 DV_DEBUG_LAYERS 环境变量），打印 logits 的 topk / argmax 信息
             try:
                 import os
+
                 if os.environ.get("DV_DEBUG_LAYERS", None):
                     last_logits = logits[:, -1, :]
                     topk_vals, topk_idx = last_logits.topk(8, dim=-1)
                     # 打印第一条序列的 topk
-                    logging.info(f"[LOGITS-DEBUG] last step topk values (first seq): {topk_vals[0].tolist()}")
-                    logging.info(f"[LOGITS-DEBUG] last step topk idx   (first seq): {topk_idx[0].tolist()}")
-                    logging.info(f"[LOGITS-DEBUG] argmax (first seq): {last_logits[0].argmax().item()}, max={last_logits[0].max().item()}")
+                    logging.info(
+                        f"[LOGITS-DEBUG] last step topk values (first seq): {topk_vals[0].tolist()}"
+                    )
+                    logging.info(
+                        f"[LOGITS-DEBUG] last step topk idx   (first seq): {topk_idx[0].tolist()}"
+                    )
+                    logging.info(
+                        f"[LOGITS-DEBUG] argmax (first seq): {last_logits[0].argmax().item()}, max={last_logits[0].max().item()}"
+                    )
             except Exception:
                 logging.exception("Failed to print logits debug info")
 
             sampled_tensor = self.sampler(logits, temperatures)
-            logging.debug(f"Sampler output shape: {sampled_tensor.shape}, dtype: {sampled_tensor.dtype}")
-            
+            logging.debug(
+                f"Sampler output shape: {sampled_tensor.shape}, dtype: {sampled_tensor.dtype}"
+            )
+
             # sampled_tensor 形状: [B, L]
             # 取最后一列作为本步新生成的 token
             if sampled_tensor.dim() == 2:
                 last_tokens = sampled_tensor[:, -1]  # [B]
             else:
                 last_tokens = sampled_tensor  # [B]
-            
+
             token_ids = last_tokens.tolist()  # 转为 python list
             logging.debug(f"Final token_ids (last tokens only): {token_ids}")
         # 6. 清理上下文
         reset_context()
 
         return token_ids
-      
-    
+
     @torch.inference_mode()
     def capture_cudagraph(self):
         config = self.config
@@ -488,10 +573,15 @@ class RunModel:
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
-            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
+            set_context(
+                False,
+                slot_mapping=slot_mapping[:bs],
+                context_lens=context_lens[:bs],
+                block_tables=block_tables[:bs],
+            )
+            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
             with torch.cuda.graph(graph, self.graph_pool):
-                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
+                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # capture
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
             self.graphs[bs] = graph

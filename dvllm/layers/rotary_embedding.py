@@ -3,7 +3,9 @@ import torch
 from torch import nn
 
 
-def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+def apply_rotary_emb(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
     # x: (batch, heads, seq_len, head_dim)
     # cos, sin: (seq_len, head_dim)
     cos = cos.unsqueeze(0).unsqueeze(0)  # -> (1, 1, seq_len, head_dim)
@@ -12,6 +14,7 @@ def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> t
     y1 = x1 * cos - x2 * sin
     y2 = x2 * cos + x1 * sin
     return torch.cat((y1, y2), dim=-1).to(x.dtype)
+
 
 class RotaryEmbedding(nn.Module):
 
@@ -25,7 +28,9 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.head_size = head_size
         assert rotary_dim == head_size
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
+        )
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
