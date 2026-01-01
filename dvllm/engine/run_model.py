@@ -5,6 +5,7 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from dvllm.config import Config
+from dvllm.models.qwen3_v2 import Qwen3ForCausalLM_V2
 from dvllm.utils.context import set_context, get_context, reset_context
 from dvllm.utils.loader import load_model
 from dvllm.layers.sampler import Sampler
@@ -62,7 +63,8 @@ class RunModel:
         # ------------------------
         # 4. 构建模型并加载权重
         # ------------------------
-        self.model = Qwen3ForCausalLM(hf_config).to(self.device)
+        # self.model = Qwen3ForCausalLM(hf_config).to(self.device)
+        self.model = Qwen3ForCausalLM_V2(hf_config).to(self.device)
         load_model(self.model, config.model, device=self.device)
 
         # 如果用户通过环境变量要求某些层开启 debug 打点（用于逐层对比）
@@ -87,9 +89,9 @@ class RunModel:
                             self.model.layers[i].debug = True
                             logging.info(f"Enabled DEBUG on layer {i}")
                         except Exception:
-                            logging.exception(f"Failed to enable debug on layer {i}")
+                            logger.exception(f"Failed to enable debug on layer {i}")
         except Exception:
-            logging.exception("Error while parsing DV_DEBUG_LAYERS")
+            logger.exception("Error while parsing DV_DEBUG_LAYERS")
 
         # ------------------------
         # 5. 采样器 & KV cache & cudagraph
@@ -456,13 +458,13 @@ class RunModel:
 
         if not hasattr(self, "device"):
             if torch.backends.mps.is_available():
-                logging.info("Using MPS device")
+                logger.info("Using MPS device")
                 self.device = torch.device("mps")
             elif torch.cuda.is_available():
-                logging.info(f"Using CUDA device")
+                logger.info(f"Using CUDA device")
                 self.device = torch.device("cuda")
             else:
-                logging.info("Using CPU device")
+                logger.info("Using CPU device")
                 self.device = torch.device("cpu")
 
         # 2. 批量生成 input_ids / positions
@@ -487,26 +489,26 @@ class RunModel:
 
         # DEBUG: 检查 logits 是否为 None 或包含 NaN
         if logits is None:
-            logging.error("ERROR: logits is None! Model inference failed.")
+            logger.error("ERROR: logits is None! Model inference failed.")
             token_ids = [0] * len(seqs)  # fallback
             reset_context()
             return token_ids
 
-        logging.debug(
+        logger.debug(
             f"logits shape: {logits.shape}, dtype: {logits.dtype}, device: {logits.device}"
         )
-        logging.debug(
+        logger.debug(
             f"logits stats: min={logits.min()}, max={logits.max()}, mean={logits.mean()}"
         )
 
         if torch.isnan(logits).any():
-            logging.error("ERROR: logits contain NaN! Model computation failed.")
+            logger.error("ERROR: logits contain NaN! Model computation failed.")
             token_ids = [0] * len(seqs)  # fallback
             reset_context()
             return token_ids
 
         if torch.isinf(logits).any():
-            logging.error("ERROR: logits contain Inf! Model computation failed.")
+            logger.error("ERROR: logits contain Inf! Model computation failed.")
             token_ids = [0] * len(seqs)  # fallback
             reset_context()
             return token_ids
@@ -524,20 +526,20 @@ class RunModel:
                     last_logits = logits[:, -1, :]
                     topk_vals, topk_idx = last_logits.topk(8, dim=-1)
                     # 打印第一条序列的 topk
-                    logging.info(
+                    logger.info(
                         f"[LOGITS-DEBUG] last step topk values (first seq): {topk_vals[0].tolist()}"
                     )
-                    logging.info(
+                    logger.info(
                         f"[LOGITS-DEBUG] last step topk idx   (first seq): {topk_idx[0].tolist()}"
                     )
-                    logging.info(
+                    logger.info(
                         f"[LOGITS-DEBUG] argmax (first seq): {last_logits[0].argmax().item()}, max={last_logits[0].max().item()}"
                     )
             except Exception:
-                logging.exception("Failed to print logits debug info")
+                logger.exception("Failed to print logits debug info")
 
             sampled_tensor = self.sampler(logits, temperatures)
-            logging.debug(
+            logger.debug(
                 f"Sampler output shape: {sampled_tensor.shape}, dtype: {sampled_tensor.dtype}"
             )
 
@@ -549,7 +551,8 @@ class RunModel:
                 last_tokens = sampled_tensor  # [B]
 
             token_ids = last_tokens.tolist()  # 转为 python list
-            logging.debug(f"Final token_ids (last tokens only): {token_ids}")
+            logger.debug(f"Final token_ids (last tokens only): {token_ids}")
+
         # 6. 清理上下文
         reset_context()
 

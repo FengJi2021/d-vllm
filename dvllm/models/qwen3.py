@@ -186,7 +186,7 @@ class TransformerBlock(nn.Module):
                     q_t,
                     k_t,
                     v_t,
-                    attn_mask=None,
+                    attn_mask=None,  # causal
                     dropout_p=0.0,
                     is_causal=True,
                     scale=sdpa_scale,

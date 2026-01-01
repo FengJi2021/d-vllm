@@ -1,13 +1,44 @@
 import os
 import logging
+import logging.config
 from transformers import AutoTokenizer
 from dvllm import LLM, SParams
 
-def setup_logger(level: str = "DEBUG"):
-    logging.basicConfig(
-        level=getattr(logging, level),
-        format="[%(levelname)s] %(name)s: %(message)s"
-    )
+def setup_logger(level: str = "DEBUG", log_file: str="test_run.log"):
+    LOGGER_CONFIG = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            }
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "default",
+                "level": level,
+            },
+            "file": {
+                "class": "logging.FileHandler",
+                "filename": log_file,
+                "formatter": "default",
+                "level": level
+            }
+        },
+        "loggers": {
+            # root logger
+            "": {"handlers": ["console"], "level": level},
+            # dvllm logger
+            "dvllm": {
+                "handlers": ["console", "file"],
+                "level": level,
+                "propagate": False,
+            },
+        },
+    }
+    logging.config.dictConfig(LOGGER_CONFIG)
+    
 
 def main():
     setup_logger()
@@ -42,10 +73,10 @@ def main():
 
     # 输出结果
     for prompt, output in zip(prompts, outputs):
-        print("\n==============================")
-        print(f"Prompt:\n{prompt}")
-        print(f"Completion:\n{output['text']}")
-        print("==============================\n")
+        logging.info("\n==============================")
+        logging.info(f"Prompt:\n{prompt}")
+        logging.info(f"Completion:\n{output['text']}")
+        logging.info("==============================\n")
 
 if __name__ == "__main__":
     main()

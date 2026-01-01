@@ -1,23 +1,28 @@
+import logging
 from functools import lru_cache
 import torch
 from torch import nn
+
+logger = logging.getLogger(__name__)
 
 
 def apply_rotary_emb(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> torch.Tensor:
     # x: (batch, heads, seq_len, head_dim)
-    # cos, sin: (seq_len, head_dim)
-    cos = cos.unsqueeze(0).unsqueeze(0)  # -> (1, 1, seq_len, head_dim)
-    sin = sin.unsqueeze(0).unsqueeze(0)
+    # cos, sin: B, 1, L, D / 2
+    # cos = cos.unsqueeze(0).unsqueeze(0)  # -> (1, 1, seq_len, 1, head_dim)
+    # sin = sin.unsqueeze(0).unsqueeze(0)
+    logger.debug(f"ROPE {x.shape} | {cos.shape} | {sin.shape}")
     x1, x2 = torch.chunk(x.float(), 2, dim=-1)
     y1 = x1 * cos - x2 * sin
     y2 = x2 * cos + x1 * sin
+
+    # B, 1, L, D
     return torch.cat((y1, y2), dim=-1).to(x.dtype)
 
 
 class RotaryEmbedding(nn.Module):
-
     def __init__(
         self,
         head_size: int,
@@ -26,13 +31,13 @@ class RotaryEmbedding(nn.Module):
         base: float,
     ) -> None:
         super().__init__()
-        self.head_size = head_size
         assert rotary_dim == head_size
+        self.head_size = head_size
         inv_freq = 1.0 / (
             base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
         )
         t = torch.arange(max_position_embeddings, dtype=torch.float)
-        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)  # L, R
         cos = freqs.cos()
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1).unsqueeze_(1)
@@ -45,10 +50,19 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # B, L, 1, D or L, 1, D
         cos_sin = self.cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
+        if cos_sin.dim() == 3:
+            # L, 1, D -> 1, 1, L, D
+            cos_sin = cos_sin.transpose(0, 1).unsqueeze(0)
+        elif cos_sin.dim() == 4:
+            # B, L, 1, D -> B, 1, L, D
+            cos_sin = cos_sin.transpose(1, 2)
+
+        cos, sin = cos_sin.chunk(2, dim=-1)  # B, 1, L, D / 2
         query = apply_rotary_emb(query, cos, sin)
         key = apply_rotary_emb(key, cos, sin)
+        logger.debug(f"ROPE query shape: {query.shape} key shape: {key.shape}")
         return query, key
 
 
@@ -61,5 +75,5 @@ def get_rope(
     rope_scaling: dict | None = None,
 ):
     assert rope_scaling is None
-    rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
-    return rotary_emb
+
+    return RotaryEmbedding(head_size, rotary_dim, max_position, base)

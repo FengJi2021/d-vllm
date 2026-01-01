@@ -35,7 +35,8 @@ class LLMEngine:
         self.ps = []
         self.events = []
         ctx = mp.get_context("spawn")
-        logger.debug(f"ctx:{ctx}")
+        logger.debug(f"ctx:{ctx._name}")
+
         for i in range(1, config.tensor_parallel_size):
             print("!!!!!!!!!!!!!!!!!!!!!!!!!")
             event = ctx.Event()
@@ -44,12 +45,13 @@ class LLMEngine:
             process.start()
             self.ps.append(process)
             self.events.append(event)
+
         self.model_runner = RunModel(config, 0, self.events)
-        logging.debug(f"!!!!!!event:{self.events}")
+        logger.debug(f"!!!!!!event:{self.events}")
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
-        logging.debug(f"scheduler:{self.scheduler}")
+        logger.debug(f"scheduler:{self.scheduler}")
         # 支持诊断 dump_path
         self.dump_path = None
         atexit.register(self.exit)
