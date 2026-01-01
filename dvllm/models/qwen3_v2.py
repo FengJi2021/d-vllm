@@ -55,6 +55,131 @@ class TransfomerBlock(nn.Module):
         # debug flag
         self.debug = False
 
+    def _attention_range_checker(self, mean, std, min_val, max_val) -> bool:
+        def is_norm(value, lower, upper) -> bool:
+            return lower <= value <= upper
+
+        mean_c = is_norm(mean, 0, 0.5)
+        std_c = is_norm(std, 0.5, 2)
+        min_c = is_norm(min_val, -10, 10)
+        max_c = is_norm(max_val, -10, 10)
+
+        # log
+        logger.debug(
+            f"[DEBUG] Attention Range Check: Mean {'Norm' if mean_c else 'abnormal'}: {mean} | "
+            f"Std {'Norm' if std_c else 'abnormal'}: {std} | "
+            f"Min {'Norm' if min_c else 'abnormal'}: {min_val} | "
+            f"Max {'Norm' if max_c else 'abnormal'}: {max_val}"
+        )
+
+        return all([mean_c, std_c, min_c, max_c])
+    
+    def _debug_sdpa(self, q, k, v, scale):
+        # Calculate scores for debug stats (expensive!)
+        scores = torch.einsum("bhld,bhmd->bhlm", q, k) * scale
+        with torch.no_grad():
+            q_stats = (
+                q.mean().item(),
+                q.std().item(),
+                q.min().item(),
+                q.max().item(),
+            )
+            k_stats = (
+                k.mean().item(),
+                k.std().item(),
+                k.min().item(),
+                k.max().item(),
+            )
+            v_stats = (
+                v.mean().item(),
+                v.std().item(),
+                v.min().item(),
+                v.max().item(),
+            )
+            sc_stats = (
+                scores.mean().item(),
+                scores.std().item(),
+                scores.min().item(),
+                scores.max().item(),
+            )
+
+            for name, stats in zip(
+                ["q", "k", "v", "sc"], [q_stats, k_stats, v_stats, sc_stats]
+            ):
+                is_good = self._attention_range_checker(*stats)
+                if not is_good:
+                    logger.warning(f"[WARNING] {name} attention range is abnormal")
+
+            logger.debug(
+                f"[DEBUG] q stats={q_stats} | k={k_stats} | v={v_stats} | scores={sc_stats}"
+            )
+        
+    def _sdpa(self, q: T, k: T, v: T, scale: float, mask: Optional[T] = None) -> T:
+        if self.debug:
+            self._debug_sdpa(q, k, v, scale)
+        
+        # If mask is provided, we must set is_causal=False
+        use_causal = True if mask is None else False
+
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=mask,
+            dropout_p=0.0,
+            is_causal=use_causal,
+            scale=scale,
+        )
+        return out
+
+    def _chunked_attention(self, q: T, k: T, v: T, chunk_size: int, sdpa_scale: float):
+        B, n_heads, L, head_dim = q.shape
+        num_kv_heads = k.shape[1]
+        factor = n_heads // num_kv_heads
+
+        out_chunks = []
+        for start in range(0, L, chunk_size):
+            end = min(L, start + chunk_size)
+            cur_chunk_size = end - start
+
+            # chunk q (current window)
+            q_chunk = q[:, :, start:end, :]
+
+            # k and v must include history for causal attention
+            k_chunk = k[:, :, 0:end, :]
+            v_chunk = v[:, :, 0:end, :]
+
+            # broadcast head in GQA
+            if factor > 1:
+                k_chunk = (
+                    k_chunk[:, :, None, :, :]
+                    .expand(B, num_kv_heads, factor, end, head_dim)
+                    .reshape(B, num_kv_heads * factor, end, head_dim)
+                )
+                v_chunk = (
+                    v_chunk[:, :, None, :, :]
+                    .expand(B, num_kv_heads, factor, end, head_dim)
+                    .reshape(B, num_kv_heads * factor, end, head_dim)
+                )
+
+            # Create Custom Mask
+            attn_mask = torch.zeros(
+                (cur_chunk_size, end), device=q.device, dtype=q.dtype
+            )
+            causal_block = torch.ones(
+                (cur_chunk_size, cur_chunk_size), device=q.device, dtype=torch.bool
+            ).triu(1)
+            attn_mask[:, start:end].masked_fill_(causal_block, float("-inf"))
+
+            out_chunks.append(
+                self._sdpa(q_chunk, k_chunk, v_chunk, scale=sdpa_scale, mask=attn_mask)
+            )
+
+        out_t = torch.cat(out_chunks, dim=2)  # cat on L dimension
+        out_t = out_t.transpose(1, 2).contiguous()  # B, L, n_heads, head_dim
+        attn_out = out_t.view(B, L, n_heads * head_dim)
+        return self.o_proj(attn_out)
+
     def forward(
         self,
         positions: Optional[T],
@@ -70,6 +195,14 @@ class TransfomerBlock(nn.Module):
 
         # Attention
         x = hidden_states  # embeddings B, L, H
+
+        # --- DEBUG CHECK 1: Input Hidden States ---
+        if self.debug:
+            if torch.isnan(x).any():
+                logger.error("!!! NaN detected in Input Hidden States !!!")
+            if torch.isinf(x).any():
+                logger.error("!!! Inf detected in Input Hidden States !!!")
+
         # norm
         x_attn = self.attn_norm(x)  # B, L, H
 
@@ -78,6 +211,12 @@ class TransfomerBlock(nn.Module):
         q, k, v = qkv.split(
             [2048, 1024, 1024], dim=2
         )  # B, L, 2048 | B, L, 1024 | B, L, 1024
+
+        # --- DEBUG CHECK 2: QKV Projection Output ---
+        if self.debug:
+            for name, tensor in [("q", q), ("k", k), ("v", v)]:
+                if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                    logger.error(f"!!! NaN/Inf detected in {name} (projection) !!!")
 
         # GQA
         assert (
@@ -107,118 +246,18 @@ class TransfomerBlock(nn.Module):
         logger.debug(f"q shape: {q.shape}, k shape: {k.shape}")
         q, k = rope_fn(positions, q, k)
 
-        # sdpa backbone
-        def attention_range_checker(mean, std, min, max) -> bool:
-            def is_norm(value, lower, upper) -> bool:
-                return lower <= value <= upper
-
-            mean_c = is_norm(mean, 0, 0.5)
-            std_c = is_norm(std, 0.5, 2)
-            min_c = is_norm(min, -10, 10)
-            max_c = is_norm(max, -10, 10)
-
-            # log
-            logger.debug(
-                f"[DEBUG] Attention Range Check: Mean {'Norm' if mean_c else 'abnormal'}: {mean} | "
-                f"Std {'Norm' if std_c else 'abnormal'}: {std} | "
-                f"Min {'Norm' if min_c else 'abnormal'}: {min} | "
-                f"Max {'Norm' if max_c else 'abnormal'}: {max}"
-            )
-
-            return all([mean_c, std_c, min_c, max_c])
-
-        def sdpa(q: T, k: T, v: T) -> T:
-            scores = torch.einsum("bhld,bhmd->bhlm", q, k) * (
-                sdpa_scale if sdpa_scale else 1.0 / math.sqrt(self.head_dim)
-            )
-            with torch.no_grad():
-                q_stats = (
-                    q.mean().item(),
-                    q.std().item(),
-                    q.min().item(),
-                    q.max().item(),
-                )
-                k_stats = (
-                    k.mean().item(),
-                    k.std().item(),
-                    k.min().item(),
-                    k.max().item(),
-                )
-                v_stats = (
-                    v.mean().item(),
-                    v.std().item(),
-                    v.min().item(),
-                    v.max().item(),
-                )
-                sc_stats = (
-                    scores.mean().item(),
-                    scores.std().item(),
-                    scores.min().item(),
-                    scores.max().item(),
-                )
-
-                for name, stats in zip(
-                    ["q", "k", "v", "sc"], [q_stats, k_stats, v_stats, sc_stats]
-                ):
-                    is_good = attention_range_checker(*stats)
-                    if not is_good:
-                        logger.warning(f"[WARNING] {name} attention range is abnormal")
-
-                logger.debug(
-                    f"[DEBUG] q mean,std,min,max={q_stats} | k={k_stats} | v={v_stats} | scores mean,std,min,max={sc_stats}"
-                )
-            out = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                dropout_p=0.0,
-                is_causal=True,
-                scale=sdpa_scale,
-            )
-
-            return out
+        # Determine scale
+        real_sdpa_scale = (
+            sdpa_scale if sdpa_scale else 1.0 / math.sqrt(self.head_dim)
+        )
 
         # chunked attention
-        factor = self.num_heads // self.num_kv_heads
         device = q.device.type
         attn_out: Optional[T] = None
         if device == "mps" and L > chunked_threshold:
-            out_chunks = []
-            for start in range(0, L, chunk_size):
-                end = min(L, start + chunk_size)
-                cur_chunk_size = end - start
-                # chunk q, k, v
-                q_chunk = q[:, :, start:end, :]
-                k_chunk = k[:, :, start:end, :]
-                v_chunk = v[:, :, start:end, :]
-                # broadcast head in GQA
-                if factor > 1:
-                    k_chunk = (
-                        k_chunk[:, :, None, :, :]
-                        .expand(
-                            B, self.num_kv_heads, factor, cur_chunk_size, self.head_dim
-                        )
-                        .reshape(
-                            B, self.num_kv_heads * factor, cur_chunk_size, self.head_dim
-                        )
-                    )
-                    v_chunk = (
-                        v_chunk[:, :, None, :, :]
-                        .expand(
-                            B, self.num_kv_heads, factor, cur_chunk_size, self.head_dim
-                        )
-                        .reshape(
-                            B, self.num_kv_heads * factor, cur_chunk_size, self.head_dim
-                        )
-                    )
-
-                out_chunks.append(sdpa(q_chunk, k_chunk, v_chunk))
-            out_t = torch.cat(out_chunks, dim=2)  # cat on L dimension
-            out_t = out_t.transpose(1, 2).contiguous()  # B, L, n_heads, head_dim
-            attn_out = out_t.view(B, L, self.num_heads * self.head_dim)
-            attn_out = self.o_proj(attn_out)
+            attn_out = self._chunked_attention(q, k, v, chunk_size, real_sdpa_scale)
         else:
+            factor = self.num_heads // self.num_kv_heads
             if factor > 1:
                 k = (
                     k[:, :, None, :, :]
@@ -230,7 +269,7 @@ class TransfomerBlock(nn.Module):
                     .expand(B, self.num_kv_heads, factor, L, self.head_dim)
                     .reshape(B, self.num_kv_heads * factor, L, self.head_dim)
                 )
-            out_t = sdpa(q, k, v)
+            out_t = self._sdpa(q, k, v, scale=real_sdpa_scale)
             out_t = out_t.transpose(1, 2).contiguous()  # B, L, n_heads, head_dim
             attn_out = out_t.view(B, L, self.num_heads * self.head_dim)
             attn_out = self.o_proj(attn_out)
