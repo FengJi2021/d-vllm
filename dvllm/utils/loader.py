@@ -1,8 +1,11 @@
 # dvllm/utils/loader.py
+import logging
 import os
 from glob import glob
 import torch
 from safetensors.torch import safe_open
+
+logger = logging.getLogger(__name__)
 
 
 def default_weight_loader(
@@ -40,7 +43,7 @@ def load_model(model: torch.nn.Module, path: str, device: torch.device | None = 
             for weight_name in f.keys():
                 all_weights[weight_name] = f.get_tensor(weight_name)
 
-    print(f"[INFO] Loaded {len(all_weights)} weights from safetensors files")
+    logger.info(f"[INFO] Loaded {len(all_weights)} weights from safetensors files")
 
     # 第一步：处理合并的权重（qkv_proj）
     # 权重文件中 q 被扩大了 2 倍（2048 vs 标准 1024）
@@ -66,7 +69,7 @@ def load_model(model: torch.nn.Module, path: str, device: torch.device | None = 
                 # 替换为 qkv_proj
                 qkv_name = weight_name.replace(".q_proj.weight", ".qkv_proj.weight")
                 weight_cache[qkv_name] = qkv
-                print(
+                logger.info(
                     f"[OK] Merged {weight_name.replace('model.', '')} + k + v -> qkv_proj shape={qkv.shape}"
                 )
                 qkv_merged_count += 1
@@ -78,7 +81,7 @@ def load_model(model: torch.nn.Module, path: str, device: torch.device | None = 
 
     # 合并到总权重
     all_weights.update(weight_cache)
-    print(f"[INFO] Merged {qkv_merged_count} qkv projections")
+    logger.info(f"[INFO] Merged {qkv_merged_count} qkv projections")
 
     # 第二步：加载权重到模型
     loaded_count = 0
@@ -123,7 +126,7 @@ def load_model(model: torch.nn.Module, path: str, device: torch.device | None = 
                 and weight_tensor_device.shape[1] == 2 * param.shape[1]
             ):
                 weight_tensor_device = weight_tensor_device[:, : param.shape[1]]
-                print(
+                logger.info(
                     f"[OK] o_proj halved: {weight_tensor.shape} -> {weight_tensor_device.shape}"
                 )
             # down_proj: 权重 [out, 2*in] 但模型期望 [out, in]，只取前半部分
@@ -132,11 +135,11 @@ def load_model(model: torch.nn.Module, path: str, device: torch.device | None = 
                 and weight_tensor_device.shape[1] == 2 * param.shape[1]
             ):
                 weight_tensor_device = weight_tensor_device[:, : param.shape[1]]
-                print(
+                logger.info(
                     f"[OK] down_proj halved: {weight_tensor.shape} -> {weight_tensor_device.shape}"
                 )
             else:
-                print(
+                logger.warning(
                     f"[WARN] shape mismatch for {mapped_name}, model: {param.shape}, weight: {weight_tensor_device.shape}, skip."
                 )
                 skipped_count += 1
@@ -145,4 +148,6 @@ def load_model(model: torch.nn.Module, path: str, device: torch.device | None = 
         param.data.copy_(weight_tensor_device)
         loaded_count += 1
 
-    print(f"[INFO] Successfully loaded {loaded_count} weights, skipped {skipped_count}")
+    logger.info(
+        f"[INFO] Successfully loaded {loaded_count} weights, skipped {skipped_count}"
+    )

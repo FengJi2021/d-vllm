@@ -1,3 +1,4 @@
+import logging
 import atexit
 from dataclasses import fields
 from time import perf_counter
@@ -10,9 +11,6 @@ from dvllm.sparams import SParams
 from dvllm.engine.run_model import RunModel
 from dvllm.engine.scheduler import Scheduler
 from dvllm.engine.seq import Sequence
-
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +36,7 @@ class LLMEngine:
         logger.debug(f"ctx:{ctx._name}")
 
         for i in range(1, config.tensor_parallel_size):
-            print("!!!!!!!!!!!!!!!!!!!!!!!!!")
+            logger.info("!!!!!!!!!!!!!!!!!!!!!!!!!")
             event = ctx.Event()
             process = ctx.Process(target=ModelRunner, args=(config, i, event))
             logger.debug(f"process:{process}")

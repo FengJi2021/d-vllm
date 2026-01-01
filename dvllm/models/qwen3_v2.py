@@ -65,15 +65,15 @@ class TransfomerBlock(nn.Module):
         max_c = is_norm(max_val, -10, 10)
 
         # log
-        logger.debug(
-            f"[DEBUG] Attention Range Check: Mean {'Norm' if mean_c else 'abnormal'}: {mean} | "
-            f"Std {'Norm' if std_c else 'abnormal'}: {std} | "
-            f"Min {'Norm' if min_c else 'abnormal'}: {min_val} | "
-            f"Max {'Norm' if max_c else 'abnormal'}: {max_val}"
-        )
+        # logger.debug(
+        #     f"[DEBUG] Attention Range Check: Mean {'Norm' if mean_c else 'abnormal'}: {mean} | "
+        #     f"Std {'Norm' if std_c else 'abnormal'}: {std} | "
+        #     f"Min {'Norm' if min_c else 'abnormal'}: {min_val} | "
+        #     f"Max {'Norm' if max_c else 'abnormal'}: {max_val}"
+        # )
 
         return all([mean_c, std_c, min_c, max_c])
-    
+
     def _debug_sdpa(self, q, k, v, scale):
         # Calculate scores for debug stats (expensive!)
         scores = torch.einsum("bhld,bhmd->bhlm", q, k) * scale
@@ -110,14 +110,14 @@ class TransfomerBlock(nn.Module):
                 if not is_good:
                     logger.warning(f"[WARNING] {name} attention range is abnormal")
 
-            logger.debug(
-                f"[DEBUG] q stats={q_stats} | k={k_stats} | v={v_stats} | scores={sc_stats}"
-            )
-        
+            # logger.debug(
+            #     f"[DEBUG] q stats={q_stats} | k={k_stats} | v={v_stats} | scores={sc_stats}"
+            # )
+
     def _sdpa(self, q: T, k: T, v: T, scale: float, mask: Optional[T] = None) -> T:
         if self.debug:
             self._debug_sdpa(q, k, v, scale)
-        
+
         # If mask is provided, we must set is_causal=False
         use_causal = True if mask is None else False
 
@@ -243,13 +243,10 @@ class TransfomerBlock(nn.Module):
         v = v.transpose(1, 2)  # B, n_kv_heads, L, head_dim
 
         # rotary embedding for q, k
-        logger.debug(f"q shape: {q.shape}, k shape: {k.shape}")
         q, k = rope_fn(positions, q, k)
 
         # Determine scale
-        real_sdpa_scale = (
-            sdpa_scale if sdpa_scale else 1.0 / math.sqrt(self.head_dim)
-        )
+        real_sdpa_scale = sdpa_scale if sdpa_scale else 1.0 / math.sqrt(self.head_dim)
 
         # chunked attention
         device = q.device.type
@@ -373,12 +370,48 @@ class Qwen3ForCausalLM_V2(nn.Module):
             try:
                 self.lm_head.weight = self.model.embed_tokens.weight
             except AttributeError:
-                import logging
-
                 logger.info("embed_tokens.weight not found, skipping tie_weights")
 
     def forward(self, input_ids: T, positions: T = None, dump_path: str = None) -> T:
         return self.model(input_ids, positions, dump_path=dump_path)
+
+    def _chunked_compute_logits(
+        self, hidden_states: T, batch_chunk, seq_chunk, vocab_chunk
+    ) -> T:
+        if hidden_states.dim() == 2:
+            hidden_states = hidden_states.unsqueeze(1)
+
+        B, L, H = hidden_states.shape
+        logits_chunks = []
+
+        for b_start in range(0, B, batch_chunk):
+            b_end = min(B, b_start + batch_chunk)
+            b_hidden = hidden_states[b_start:b_end, :, :]
+
+            b_logits = []
+
+            for seq_start in range(0, L, seq_chunk):
+                seq_end = min(L, seq_start + seq_chunk)
+                seq_hidden = b_hidden[:, seq_start:seq_end, :]
+
+                seq_logits_chunks = []
+
+                for vocab_start in range(0, self.lm_head.weight.size(0), vocab_chunk):
+                    vocab_end = min(
+                        self.lm_head.weight.size(0), vocab_start + vocab_chunk
+                    )
+                    w_chunk = self.lm_head.weight[
+                        vocab_start:vocab_end, :
+                    ]  # vocab * hidden
+                    logits_chunk = F.linear(seq_hidden, w_chunk)  # B_C, L_C, V_C
+                    seq_logits_chunks.append(logits_chunk)
+
+                # cat sequence chunk
+                b_logits.append(torch.cat(seq_logits_chunks, dim=2))  # B_C, L_C, V
+
+            logits_chunks.append(torch.cat(b_logits, dim=1))  # B_C, L, V
+
+        return torch.cat(logits_chunks, dim=0)  # B, L, V
 
     def compute_logits(
         self,
@@ -390,37 +423,20 @@ class Qwen3ForCausalLM_V2(nn.Module):
         """
         MPS: calculate once on GPU
         CUDA: calcuate by chunk
+        Only last logits
         """
         B, L, H = hidden_states.shape
+
+        if B == 1 and L > 1:
+            hidden_states = hidden_states[:, -1, :]
+            L = 1
+
         device = hidden_states.device
 
         if device.type == "mps" or device.type == "cpu":
             return F.linear(hidden_states, self.lm_head.weight)
 
-        logits_chunks = []
-        weight_cpu = self.lm_head.weight.cpu()
-
-        for b_start in range(0, B, batch_chunk):
-            b_end = min(B, b_start + batch_chunk)
-            b_hidden = hidden_states[b_start:b_end, :, :]
-
-            b_logits = []
-
-            for seq_start in range(0, L, seq_chunk):
-                seq_end = min(0, L, seq_chunk)
-                seq_hidden = b_hidden[:, seq_start:seq_end, :].cpu()
-
-                seq_logits_chunks = []
-
-                for vocab_start in range(0, weight_cpu.size(0), vocab_chunk):
-                    vocab_end = min(weight_cpu.size(0), vocab_start + vocab_chunk)
-                    w_chunk = weight_cpu[vocab_start:vocab_end, :]  # vocab * hidden
-                    logits_chunk = F.linear(seq_hidden, w_chunk)  # B_C, L_C, V_C
-                    seq_logits_chunks.append(logits_chunk)
-
-                # cat sequence chunk
-                b_logits.append(torch.cat(seq_logits_chunks), dim=2)  # B_C, L_C, V
-
-            logits_chunks.append(torch.cat(b_logits, dim=1))  # B_C, L, V
-
-        return torch.cat(logits_chunk, dim=0)  # B, L, V
+        # other device (cuda), use chunked compute
+        return self._chunked_compute_logits(
+            hidden_states, batch_chunk, seq_chunk, vocab_chunk
+        )

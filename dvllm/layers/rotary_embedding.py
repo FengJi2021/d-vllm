@@ -13,7 +13,6 @@ def apply_rotary_emb(
     # cos, sin: B, 1, L, D / 2
     # cos = cos.unsqueeze(0).unsqueeze(0)  # -> (1, 1, seq_len, 1, head_dim)
     # sin = sin.unsqueeze(0).unsqueeze(0)
-    logger.debug(f"ROPE {x.shape} | {cos.shape} | {sin.shape}")
     x1, x2 = torch.chunk(x.float(), 2, dim=-1)
     y1 = x1 * cos - x2 * sin
     y2 = x2 * cos + x1 * sin
@@ -62,7 +61,6 @@ class RotaryEmbedding(nn.Module):
         cos, sin = cos_sin.chunk(2, dim=-1)  # B, 1, L, D / 2
         query = apply_rotary_emb(query, cos, sin)
         key = apply_rotary_emb(key, cos, sin)
-        logger.debug(f"ROPE query shape: {query.shape} key shape: {key.shape}")
         return query, key
 
 

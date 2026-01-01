@@ -3,6 +3,8 @@ import logging
 import logging.config
 from transformers import AutoTokenizer
 from dvllm import LLM, SParams
+import torch
+
 
 def setup_logger(level: str = "DEBUG", log_file: str="test_run.log"):
     LOGGER_CONFIG = {
@@ -42,19 +44,21 @@ def setup_logger(level: str = "DEBUG", log_file: str="test_run.log"):
 
 def main():
     setup_logger()
-
+    if torch.cuda.is_available():
+        # use cuda 1
+        torch.cuda.set_device(1)
     model_path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
     logging.info(f"Loading model from: {model_path}")
 
     # 初始化 tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    # tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # 初始化 LLM，指定 MPS
     llm = LLM(
         model_path,
         enforce_eager=True,
         tensor_parallel_size=1,
-        device_type="mps",
+        device_type="cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
     )
 
     # 生成参数

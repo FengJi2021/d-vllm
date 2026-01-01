@@ -201,14 +201,16 @@ class RunModel:
             num_seqs = min(1, self.config.max_num_seqs)  # 只用 1 个序列做 warmup
             warmup_seq_len = min(256, max_model_len)  # 限制序列长度
         else:
+            # FIX OOM on cuda
+            safe_warmup_len = min(512, max_model_len)
             num_seqs = min(
-                max_num_batched_tokens // max_model_len, self.config.max_num_seqs
+                max_num_batched_tokens // safe_warmup_len, self.config.max_num_seqs
             )
-            warmup_seq_len = max_model_len
+            warmup_seq_len = safe_warmup_len
 
         seqs = [Sequence(token_ids=[0] * warmup_seq_len) for _ in range(num_seqs)]
 
-        logging.info(
+        logger.info(
             f"Warmup model with {num_seqs} sequences of length {warmup_seq_len} on {device}"
         )
 
@@ -230,6 +232,9 @@ class RunModel:
             hf_config.hidden_size // hf_config.num_attention_heads,
         )
 
+        # Reserve GB for logits compute
+        safety_buffer = 10 * 1024 * 1024 * 1024
+
         if device.type == "cuda":
             free, total = torch.cuda.mem_get_info()
             used = total - free
@@ -243,8 +248,15 @@ class RunModel:
                 * head_dim
                 * hf_config.torch_dtype.itemsize
             )
+
             config.num_kvcache_blocks = (
-                int(total * config.gpu_memory_utilization - used - peak + current)
+                int(
+                    total * config.gpu_memory_utilization
+                    - used
+                    - safety_buffer
+                    - peak
+                    + current
+                )
                 // block_bytes
             )
         elif device.type == "mps":
@@ -269,6 +281,13 @@ class RunModel:
             head_dim,
             device=device,
             dtype=hf_config.torch_dtype,
+        )
+
+        # log kv cache size
+        total_bytes = self.kv_cache.numel() * self.kv_cache.element_size()
+        logger.info(
+            f"Allocated KV cache: {config.num_kvcache_blocks} blocks, "
+            f"{total_bytes / (1024**3):.2f} GB on {device}"
         )
 
         layer_id = 0
