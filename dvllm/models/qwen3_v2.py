@@ -32,8 +32,10 @@ class TransfomerBlock(nn.Module):
         # Multi-Group-Attention
         # q=2048, k=1024, v=1024
         # 2 query share one k, v
-        qkv_output_size = 2048 + 1024 + 1024
+        qkv_output_size = (self.num_heads + self.num_kv_heads + self.num_kv_heads) * self.head_dim
+        
         self.qkv_proj = nn.Linear(hidden_size, qkv_output_size, bias=False)
+        
         self.o_proj = nn.Linear(num_heads * head_dim, hidden_size, bias=False)
 
         # attention norm
@@ -53,7 +55,7 @@ class TransfomerBlock(nn.Module):
         self.ffn_activation = SiluAndMul()
 
         # debug flag
-        self.debug = False
+        self.debug = True
 
     def _attention_range_checker(self, mean, std, min_val, max_val) -> bool:
         def is_norm(value, lower, upper) -> bool:
@@ -208,8 +210,15 @@ class TransfomerBlock(nn.Module):
 
         # qkv: by chunk, sdpa as default backend operato
         qkv: T = self.qkv_proj(x_attn)  # B, L, 4096
+        
+        # MQA
         q, k, v = qkv.split(
-            [2048, 1024, 1024], dim=2
+            [
+                self.num_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+            ],
+            dim=2,
         )  # B, L, 2048 | B, L, 1024 | B, L, 1024
 
         # --- DEBUG CHECK 2: QKV Projection Output ---
@@ -217,17 +226,6 @@ class TransfomerBlock(nn.Module):
             for name, tensor in [("q", q), ("k", k), ("v", v)]:
                 if torch.isnan(tensor).any() or torch.isinf(tensor).any():
                     logger.error(f"!!! NaN/Inf detected in {name} (projection) !!!")
-
-        # GQA
-        assert (
-            q.shape[-1] == self.num_heads * self.head_dim
-        ), f"q shape {q.shape[-1]} not match {self.num_heads} * {self.head_dim}"
-        assert (
-            k.shape[-1] == self.num_kv_heads * self.head_dim
-        ), f"k shape {k.shape[-1]} not match {self.num_kv_heads} * {self.head_dim}"
-        assert (
-            v.shape[-1] == self.num_kv_heads * self.head_dim
-        ), f"v shape {v.shape[-1]} not match {self.num_kv_heads} * {self.head_dim}"
 
         q = q.view(B, L, self.num_heads, self.head_dim)
         k = k.view(B, L, self.num_kv_heads, self.head_dim)
@@ -284,7 +282,6 @@ class TransfomerBlock(nn.Module):
 
         x = x + down
 
-        # return
         return x
 
 

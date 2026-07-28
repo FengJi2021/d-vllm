@@ -18,6 +18,10 @@ class Sampler(nn.Module):
 
         返回: [B, L] 张量，每个位置采样一个 token
         """
+        # in case of decode only next token logits
+        if logits.dim() == 2:
+            logits = logits.unsqueeze(0)
+
         B, L, V = logits.shape
 
         # 处理 temperatures 形状
